@@ -1,0 +1,59 @@
+{
+    "visible_camera": {
+        "url": "rtsp://192.168.1.100:554/visible",
+        "transport": "tcp",
+        "timeout_ms": 5000,
+        "max_reconnect": 10,
+        "reconnect_interval_ms": 3000,
+        "use_hw_decode": true,
+        "hw_device_type": "cuda"
+    },
+    "infrared_camera": {
+        "url": "rtsp://192.168.1.100:554/infrared",
+        "transport": "tcp",
+        "timeout_ms": 5000,
+        "max_reconnect": 10,
+        "reconnect_interval_ms": 3000,
+        "use_hw_decode": true,
+        "hw_device_type": "cuda"
+    },
+    "sync_config": {
+        "max_timestamp_diff_us": 33000,
+        "max_queue_size": 30,
+        "sync_timeout_ms": 100
+    },
+    "detector_config": {
+        "trt_config": {
+            "engine_path": "models/corner_slot.trt",
+            "input_blob_name": "input",
+            "output_blob_names": ["output"],
+            "max_batch_size": 1,
+            "use_fp16": true,
+            "gpu_device_id": 0,
+            "workspace_size": 1073741824
+        },
+        "preprocess_config": {
+            "input_width": 640,
+            "input_height": 640,
+            "mean_r": 0.485,
+            "mean_g": 0.456,
+            "mean_b": 0.406,
+            "std_r": 0.229,
+            "std_g": 0.224,
+            "std_b": 0.225,
+            "normalize": true,
+            "bgr_to_rgb": true,
+            "letterbox": true,
+            "letterbox_color": 114.0,
+            "use_float16": false
+        },
+        "confidence_threshold": 0.5,
+        "nms_threshold": 0.45,
+        "max_detections": 100,
+        "input_queue_size": 10,
+        "output_queue_size": 10,
+        "num_preprocess_streams": 1
+    },
+    "enable_sync": true,
+    "use_visible_only": false
+}
