@@ -30,7 +30,8 @@
             "max_batch_size": 1,
             "use_fp16": true,
             "gpu_device_id": 0,
-            "workspace_size": 1073741824
+            "workspace_size": 1073741824,
+            "num_execution_contexts": 4
         },
         "preprocess_config": {
             "input_width": 640,

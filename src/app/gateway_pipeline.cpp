@@ -221,12 +221,27 @@ void GatewayPipeline::StatsThread() {
         std::this_thread::sleep_for(std::chrono::seconds(1));
 
         Stats stats = GetStats();
-        LOG_INFO << "Stats - Visible: " << stats.visible_fps << "fps, "
-                 << "Infrared: " << stats.infrared_fps << "fps, "
+        int avail_ctx = detector_ ? detector_->GetEngine()
+                                      ? detector_->GetEngine()->GetAvailableContexts()
+                                      : 0;
+        int total_ctx = detector_ ? detector_->GetEngine()
+                                      ? detector_->GetEngine()->GetContextPoolSize()
+                                      : 0;
+
+        LOG_INFO << "STATS | Visible: " << stats.visible_fps << "fps, "
+                 << "IR: " << stats.infrared_fps << "fps, "
                  << "Sync: " << stats.sync_fps << "fps, "
                  << "Detect: " << stats.detect_fps << "fps, "
-                 << "Total processed: " << stats.total_frames_processed
+                 << "CtxPool: " << avail_ctx << "/" << total_ctx
+                 << " (avail/total), "
+                 << "Processed: " << stats.total_frames_processed
                  << ", Detections: " << stats.total_detections;
+
+        if (avail_ctx == 0 && total_ctx > 0) {
+            LOG_WARN << "CONTEXT POOL EXHAUSTED! All " << total_ctx
+                     << " execution contexts are in use. Consider increasing "
+                        "num_execution_contexts.";
+        }
     }
 }
 

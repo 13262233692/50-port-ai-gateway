@@ -75,29 +75,32 @@ public:
         output_queue_ = queue;
     }
 
+    std::shared_ptr<TrtEngine> GetEngine() const { return engine_; }
+
     float GetFps() const { return fps_counter_.GetFps(); }
 
 private:
-    void WorkerThread();
+    void WorkerThread(int worker_id);
     void Nms(std::vector<Detection>& detections, float iou_threshold);
     float CalculateIou(const Detection& a, const Detection& b);
     bool ConvertTo3D(const Detection& det, const FramePtr& frame, CornerSlot3D& slot_3d);
 
     CornerSlotDetectorConfig config_;
     std::atomic<bool> running_{false};
-    std::thread worker_thread_;
+    std::vector<std::thread> worker_threads_;
+    int num_workers_ = 0;
 
     std::shared_ptr<TrtEngine> engine_;
-    std::shared_ptr<CudaPreprocessor> preprocessor_;
+    std::vector<std::shared_ptr<CudaPreprocessor>> preprocessors_;
 
     std::shared_ptr<ThreadSafeQueue<FramePtr>> input_queue_;
     std::shared_ptr<ThreadSafeQueue<CornerSlotDetectionResultPtr>> output_queue_;
 
-    cudaStream_t cuda_stream_ = nullptr;
+    std::vector<cudaStream_t> cuda_streams_;
 
     FpsCounter fps_counter_;
-
-    std::mutex detector_mutex_;
+    std::atomic<int> total_detections_{0};
+    std::atomic<int> dropped_frames_{0};
 };
 
 }

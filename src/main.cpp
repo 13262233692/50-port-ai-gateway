@@ -93,6 +93,7 @@ int main(int argc, char* argv[]) {
     config.detector_config.trt_config.max_batch_size = 1;
     config.detector_config.trt_config.use_fp16 = true;
     config.detector_config.trt_config.gpu_device_id = 0;
+    config.detector_config.trt_config.num_execution_contexts = 4;
 
     config.detector_config.preprocess_config.input_width = 640;
     config.detector_config.preprocess_config.input_height = 640;
@@ -104,6 +105,7 @@ int main(int argc, char* argv[]) {
     config.detector_config.confidence_threshold = 0.5f;
     config.detector_config.nms_threshold = 0.45f;
     config.detector_config.max_detections = 100;
+    config.detector_config.num_preprocess_streams = 4;
 
     config.enable_sync = enable_sync;
     config.use_visible_only = visible_only;

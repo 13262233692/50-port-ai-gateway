@@ -9,7 +9,10 @@ namespace port_ai_gateway {
 
 CornerSlotDetector::CornerSlotDetector()
     : running_{false}
-    , fps_counter_(30) {
+    , num_workers_(0)
+    , fps_counter_(30)
+    , total_detections_{0}
+    , dropped_frames_{0} {
 }
 
 CornerSlotDetector::~CornerSlotDetector() {
@@ -37,19 +40,31 @@ bool CornerSlotDetector::Init(const CornerSlotDetectorConfig& config) {
         return false;
     }
 
-    preprocessor_ = std::make_shared<CudaPreprocessor>();
-    if (!preprocessor_->Init(config_.preprocess_config)) {
-        LOG_ERROR << "Failed to initialize CUDA preprocessor";
-        return false;
+    num_workers_ = config_.trt_config.num_execution_contexts;
+
+    preprocessors_.resize(num_workers_);
+    for (int i = 0; i < num_workers_; i++) {
+        preprocessors_[i] = std::make_shared<CudaPreprocessor>();
+        if (!preprocessors_[i]->Init(config_.preprocess_config)) {
+            LOG_ERROR << "Failed to initialize CUDA preprocessor for worker " << i;
+            return false;
+        }
     }
 
-    cudaError_t err = cudaStreamCreate(&cuda_stream_);
-    if (err != cudaSuccess) {
-        LOG_ERROR << "Failed to create CUDA stream: " << cudaGetErrorString(err);
-        return false;
+    cuda_streams_.resize(num_workers_, nullptr);
+    for (int i = 0; i < num_workers_; i++) {
+        cudaError_t err = cudaStreamCreate(&cuda_streams_[i]);
+        if (err != cudaSuccess) {
+            LOG_ERROR << "Failed to create CUDA stream " << i
+                      << ": " << cudaGetErrorString(err);
+            return false;
+        }
     }
 
-    LOG_INFO << "CornerSlotDetector initialized";
+    LOG_INFO << "CornerSlotDetector initialized: "
+             << num_workers_ << " workers, contexts="
+             << engine_->GetContextPoolSize()
+             << ", stream_per_worker=" << (cuda_streams_.size() == (size_t)num_workers_);
     return true;
 }
 
@@ -59,15 +74,18 @@ bool CornerSlotDetector::Start() {
         return true;
     }
 
-    if (!engine_ || !preprocessor_) {
+    if (!engine_ || preprocessors_.empty()) {
         LOG_ERROR << "CornerSlotDetector not initialized";
         return false;
     }
 
     running_.store(true);
-    worker_thread_ = std::thread(&CornerSlotDetector::WorkerThread, this);
+    worker_threads_.reserve(num_workers_);
+    for (int i = 0; i < num_workers_; i++) {
+        worker_threads_.emplace_back(&CornerSlotDetector::WorkerThread, this, i);
+    }
 
-    LOG_INFO << "CornerSlotDetector started";
+    LOG_INFO << "CornerSlotDetector started with " << num_workers_ << " workers";
     return true;
 }
 
@@ -85,60 +103,91 @@ void CornerSlotDetector::Stop() {
         output_queue_->Stop();
     }
 
-    if (worker_thread_.joinable()) {
-        worker_thread_.join();
+    for (auto& t : worker_threads_) {
+        if (t.joinable()) {
+            t.join();
+        }
     }
+    worker_threads_.clear();
 
-    if (cuda_stream_) {
-        cudaStreamDestroy(cuda_stream_);
-        cuda_stream_ = nullptr;
+    for (auto& s : cuda_streams_) {
+        if (s) {
+            cudaStreamDestroy(s);
+            s = nullptr;
+        }
     }
+    cuda_streams_.clear();
 
     if (engine_) {
         engine_->Release();
     }
-    if (preprocessor_) {
-        preprocessor_->Release();
+    for (auto& p : preprocessors_) {
+        if (p) {
+            p->Release();
+        }
     }
+    preprocessors_.clear();
 
-    LOG_INFO << "CornerSlotDetector stopped";
+    LOG_INFO << "CornerSlotDetector stopped, total_detections="
+             << total_detections_.load()
+             << ", dropped_frames=" << dropped_frames_.load();
 }
 
 bool CornerSlotDetector::Detect(const FramePtr& frame,
                                  CornerSlotDetectionResult& result,
                                  cudaStream_t stream) {
-    if (!engine_ || !preprocessor_ || !frame) {
+    if (!engine_ || preprocessors_.empty() || !frame) {
         return false;
     }
-
-    std::lock_guard<std::mutex> lock(detector_mutex_);
 
     ScopedTimer total_timer;
     result.timestamp_us = frame->timestamp_us;
     result.camera_id = frame->camera_id;
     result.camera_type = frame->camera_type;
 
-    cudaStream_t use_stream = stream ? stream : cuda_stream_;
+    cudaStream_t use_stream = stream;
+    int stream_idx = -1;
+    if (!use_stream) {
+        static thread_local int tls_worker_id = 0;
+        stream_idx = tls_worker_id % std::max(1, (int)cuda_streams_.size());
+        use_stream = cuda_streams_[stream_idx];
+    }
 
+    int worker_id = stream_idx >= 0 ? stream_idx : 0;
+    worker_id = worker_id % std::max(1, (int)preprocessors_.size());
+
+    auto ctx = engine_->AcquireContext(5000);
+    if (!ctx) {
+        LOG_WARN << "Detector: Context pool exhausted (camera=" << frame->camera_id << ")";
+        dropped_frames_++;
+        return false;
+    }
+
+    int ctx_id = ctx->Id();
     LetterboxInfo letterbox_info;
-    float* input_buffer = static_cast<float*>(engine_->GetInputBuffer());
+    float* input_buffer = static_cast<float*>(ctx->InputBuffer());
 
     ScopedTimer preprocess_timer;
-    if (!preprocessor_->Process(frame, input_buffer, letterbox_info, use_stream)) {
-        LOG_ERROR << "Preprocessing failed";
+    if (!preprocessors_[worker_id]->Process(frame, input_buffer, letterbox_info, use_stream)) {
+        LOG_ERROR << "Context " << ctx_id << ": Preprocessing FAILED";
+        engine_->ReleaseContext(std::move(ctx));
         return false;
     }
     result.preprocess_time_ms = preprocess_timer.ElapsedMillis();
 
-    InferenceResultPtr trt_result = engine_->RunInference(frame, letterbox_info, use_stream);
+    InferenceResultPtr trt_result = engine_->RunInferenceWithContext(
+        ctx, frame, letterbox_info, use_stream);
+
     if (!trt_result) {
-        LOG_ERROR << "Inference failed";
+        LOG_ERROR << "Context " << ctx_id << ": Inference FAILED";
+        engine_->ReleaseContext(std::move(ctx));
         return false;
     }
     result.inference_time_ms = trt_result->inference_time_ms;
 
-    ScopedTimer postprocess_timer;
+    engine_->ReleaseContext(std::move(ctx));
 
+    ScopedTimer postprocess_timer;
     std::vector<Detection> detections = trt_result->detections;
 
     auto it = std::remove_if(detections.begin(), detections.end(),
@@ -162,6 +211,7 @@ bool CornerSlotDetector::Detect(const FramePtr& frame,
         }
     }
 
+    total_detections_ += static_cast<int>(result.corner_slots.size());
     result.postprocess_time_ms = postprocess_timer.ElapsedMillis();
     result.total_time_ms = total_timer.ElapsedMillis();
 
@@ -172,7 +222,9 @@ bool CornerSlotDetector::Detect(const FramePtr& frame,
 
 void CornerSlotDetector::PushFrame(const FramePtr& frame) {
     if (input_queue_) {
-        input_queue_->TryPush(frame);
+        if (!input_queue_->TryPush(frame)) {
+            dropped_frames_++;
+        }
     }
 }
 
@@ -187,22 +239,33 @@ CornerSlotDetectionResultPtr CornerSlotDetector::GetResult(int timeout_ms) {
     return nullptr;
 }
 
-void CornerSlotDetector::WorkerThread() {
+void CornerSlotDetector::WorkerThread(int worker_id) {
+    static thread_local int tls_worker_id = worker_id;
+
+    LOG_DEBUG << "Worker " << worker_id << " started";
+
     while (running_.load()) {
         FramePtr frame;
         if (!input_queue_->WaitPop(frame, 100)) {
             continue;
         }
-
         if (!frame) {
             continue;
         }
 
         auto result = std::make_shared<CornerSlotDetectionResult>();
-        if (Detect(frame, *result, cuda_stream_)) {
-            output_queue_->TryPush(result);
+        cudaStream_t use_stream = (worker_id < (int)cuda_streams_.size())
+                                      ? cuda_streams_[worker_id]
+                                      : nullptr;
+
+        if (Detect(frame, *result, use_stream)) {
+            if (!output_queue_->TryPush(result)) {
+                dropped_frames_++;
+            }
         }
     }
+
+    LOG_DEBUG << "Worker " << worker_id << " stopped";
 }
 
 void CornerSlotDetector::Nms(std::vector<Detection>& detections, float iou_threshold) {
@@ -222,21 +285,17 @@ void CornerSlotDetector::Nms(std::vector<Detection>& detections, float iou_thres
         if (suppressed[i]) {
             continue;
         }
-
         keep.push_back(detections[i]);
-
         for (size_t j = i + 1; j < detections.size(); j++) {
             if (suppressed[j]) {
                 continue;
             }
-
             float iou = CalculateIou(detections[i], detections[j]);
             if (iou > iou_threshold) {
                 suppressed[j] = true;
             }
         }
     }
-
     detections = std::move(keep);
 }
 
@@ -245,7 +304,6 @@ float CornerSlotDetector::CalculateIou(const Detection& a, const Detection& b) {
     float y1 = std::max(a.y1, b.y1);
     float x2 = std::min(a.x2, b.x2);
     float y2 = std::min(a.y2, b.y2);
-
     float w = std::max(0.0f, x2 - x1);
     float h = std::max(0.0f, y2 - y1);
     float intersection = w * h;
@@ -257,7 +315,6 @@ float CornerSlotDetector::CalculateIou(const Detection& a, const Detection& b) {
     if (union_area <= 0) {
         return 0;
     }
-
     return intersection / union_area;
 }
 
@@ -268,9 +325,8 @@ bool CornerSlotDetector::ConvertTo3D(const Detection& det, const FramePtr& frame
     float w = det.x2 - det.x1;
     float h = det.y2 - det.y1;
 
-    float focal_length = 500.0f;
-    float real_slot_width = 0.12f;
-    float real_slot_height = 0.08f;
+    const float focal_length = 500.0f;
+    const float real_slot_width = 0.12f;
 
     if (w > 0) {
         float distance = (focal_length * real_slot_width) / w;
@@ -281,21 +337,18 @@ bool CornerSlotDetector::ConvertTo3D(const Detection& det, const FramePtr& frame
 
         slot_3d.x = (cx - img_width / 2.0f) * distance / focal_length;
         slot_3d.y = (cy - img_height / 2.0f) * distance / focal_length;
-
         slot_3d.width = w * distance / focal_length;
         slot_3d.height = h * distance / focal_length;
         slot_3d.depth = 0.05f;
-
         slot_3d.yaw = 0.0f;
 
-        slot_3d.image_points.push_back({det.x1, det.y1});
-        slot_3d.image_points.push_back({det.x2, det.y1});
-        slot_3d.image_points.push_back({det.x2, det.y2});
-        slot_3d.image_points.push_back({det.x1, det.y2});
-
+        slot_3d.image_points.reserve(4);
+        slot_3d.image_points.emplace_back(det.x1, det.y1);
+        slot_3d.image_points.emplace_back(det.x2, det.y1);
+        slot_3d.image_points.emplace_back(det.x2, det.y2);
+        slot_3d.image_points.emplace_back(det.x1, det.y2);
         return true;
     }
-
     return false;
 }
 
