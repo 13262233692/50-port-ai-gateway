@@ -12,6 +12,9 @@
 #include "streaming/rtsp_reader.h"
 #include "streaming/frame_synchronizer.h"
 #include "inference/corner_slot_detector.h"
+#include "tracking/corner_slot_tracker.h"
+#include "safety/swing_energy_analyzer.h"
+#include "safety/plc_command_manager.h"
 
 namespace port_ai_gateway {
 
@@ -20,12 +23,23 @@ struct GatewayConfig {
     RtspConfig infrared_camera;
     FrameSynchronizerConfig sync_config;
     CornerSlotDetectorConfig detector_config;
+    TrackerConfig tracker_config;
+    EnergyAnalyzerConfig energy_config;
+    PlcManagerConfig plc_config;
+
     bool use_visible_only = false;
     bool enable_sync = true;
+    bool enable_tracking = true;
+    bool enable_energy_analysis = true;
+    bool enable_plc_output = true;
+
     int result_callback_interval_ms = 100;
 };
 
 using ResultCallback = std::function<void(const CornerSlotDetectionResultPtr&)>;
+using TrackingCallback = std::function<void(const std::vector<CornerSlotTrackPtr>&)>;
+using EnergyStatusCallback = std::function<void(const std::vector<TrackEnergyStatus>&)>;
+using PlcCommandCallback = std::function<void(const PlcCommand&)>;
 
 class GatewayPipeline {
 public:
@@ -38,7 +52,16 @@ public:
     bool IsRunning() const { return running_.load(); }
 
     void SetResultCallback(ResultCallback callback) {
-        result_callback_ = callback;
+        result_callback_ = std::move(callback);
+    }
+    void SetTrackingCallback(TrackingCallback callback) {
+        tracking_callback_ = std::move(callback);
+    }
+    void SetEnergyStatusCallback(EnergyStatusCallback callback) {
+        energy_callback_ = std::move(callback);
+    }
+    void SetPlcCommandCallback(PlcCommandCallback callback) {
+        plc_callback_ = std::move(callback);
     }
 
     CornerSlotDetectionResultPtr GetLatestResult(int timeout_ms = 100);
@@ -47,6 +70,9 @@ public:
     std::shared_ptr<RtspReader> GetInfraredReader() { return infrared_reader_; }
     std::shared_ptr<FrameSynchronizer> GetSynchronizer() { return synchronizer_; }
     std::shared_ptr<CornerSlotDetector> GetDetector() { return detector_; }
+    std::shared_ptr<CornerSlotTracker> GetTracker() { return tracker_; }
+    std::shared_ptr<SwingEnergyAnalyzer> GetEnergyAnalyzer() { return energy_analyzer_; }
+    std::shared_ptr<PlcCommandManager> GetPlcManager() { return plc_manager_; }
 
     struct Stats {
         int visible_fps = 0;
@@ -57,6 +83,14 @@ public:
         float avg_total_ms = 0;
         int total_frames_processed = 0;
         int total_detections = 0;
+
+        int active_tracks = 0;
+        int total_tracks = 0;
+
+        int highest_safety_level = 0;
+        int total_plc_commands = 0;
+        int pending_plc_commands = 0;
+        bool emergency_active = false;
     };
 
     Stats GetStats() const;
@@ -64,6 +98,9 @@ public:
 private:
     void ResultThread();
     void StatsThread();
+    void SafetyThread();
+
+    void ProcessDetectionResult(const CornerSlotDetectionResultPtr& result);
 
     GatewayConfig config_;
     std::atomic<bool> running_{false};
@@ -72,6 +109,9 @@ private:
     std::shared_ptr<RtspReader> infrared_reader_;
     std::shared_ptr<FrameSynchronizer> synchronizer_;
     std::shared_ptr<CornerSlotDetector> detector_;
+    std::shared_ptr<CornerSlotTracker> tracker_;
+    std::shared_ptr<SwingEnergyAnalyzer> energy_analyzer_;
+    std::shared_ptr<PlcCommandManager> plc_manager_;
 
     std::shared_ptr<ThreadSafeQueue<FramePtr>> visible_queue_;
     std::shared_ptr<ThreadSafeQueue<FramePtr>> infrared_queue_;
@@ -80,8 +120,13 @@ private:
     std::shared_ptr<ThreadSafeQueue<CornerSlotDetectionResultPtr>> result_queue_;
 
     ResultCallback result_callback_;
+    TrackingCallback tracking_callback_;
+    EnergyStatusCallback energy_callback_;
+    PlcCommandCallback plc_callback_;
+
     std::thread result_thread_;
     std::thread stats_thread_;
+    std::thread safety_thread_;
 
     mutable std::mutex stats_mutex_;
     Stats stats_;

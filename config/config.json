@@ -55,6 +55,51 @@
         "output_queue_size": 10,
         "num_preprocess_streams": 1
     },
+    "tracker_config": {
+        "kf_config": {
+            "process_noise_pos": 0.01,
+            "process_noise_vel": 0.5,
+            "measurement_noise": 0.1,
+            "initial_cov_pos": 1.0,
+            "initial_cov_vel": 10.0,
+            "dt_default": 0.033
+        },
+        "max_age": 60,
+        "n_init": 3,
+        "max_matching_distance": 2.0,
+        "min_detection_confidence": 0.3,
+        "max_trajectory_points": 500,
+        "max_tracks": 16
+    },
+    "energy_config": {
+        "spreader_mass_kg": 35000.0,
+        "gravity_m_s2": 9.81,
+        "rope_length_m": 15.0,
+        "energy_warning_threshold_j": 5000.0,
+        "energy_danger_threshold_j": 15000.0,
+        "energy_critical_threshold_j": 30000.0,
+        "speed_warning_m_s": 1.5,
+        "speed_danger_m_s": 2.5,
+        "speed_critical_m_s": 4.0,
+        "amplitude_warning_m": 0.5,
+        "amplitude_danger_m": 1.2,
+        "amplitude_critical_m": 2.0,
+        "min_cycle_period_s": 2.0,
+        "max_cycle_period_s": 15.0,
+        "min_points_per_cycle": 15,
+        "yaw_warning_rad": 0.2,
+        "yaw_danger_rad": 0.5,
+        "max_history_cycles": 50
+    },
+    "plc_config": {
+        "max_pending_commands": 100,
+        "command_history_size": 500,
+        "min_interval_between_same_type_ms": 500,
+        "enable_emergency_stop": true,
+        "enable_speed_limit": true,
+        "enable_swing_damping": true,
+        "min_safety_level_for_command": 2.0
+    },
     "enable_sync": true,
     "use_visible_only": false
 }

@@ -110,6 +110,34 @@ int main(int argc, char* argv[]) {
     config.enable_sync = enable_sync;
     config.use_visible_only = visible_only;
 
+    config.enable_tracking = true;
+    config.enable_energy_analysis = true;
+    config.enable_plc_output = true;
+
+    config.tracker_config.max_age = 60;
+    config.tracker_config.n_init = 3;
+    config.tracker_config.max_matching_distance = 2.0f;
+    config.tracker_config.kf_config.process_noise_pos = 0.01f;
+    config.tracker_config.kf_config.process_noise_vel = 0.5f;
+    config.tracker_config.kf_config.measurement_noise = 0.1f;
+
+    config.energy_config.spreader_mass_kg = 35000.0f;
+    config.energy_config.rope_length_m = 15.0f;
+    config.energy_config.energy_warning_threshold_j = 5000.0f;
+    config.energy_config.energy_danger_threshold_j = 15000.0f;
+    config.energy_config.energy_critical_threshold_j = 30000.0f;
+    config.energy_config.speed_warning_m_s = 1.5f;
+    config.energy_config.speed_danger_m_s = 2.5f;
+    config.energy_config.speed_critical_m_s = 4.0f;
+    config.energy_config.amplitude_warning_m = 0.5f;
+    config.energy_config.amplitude_danger_m = 1.2f;
+    config.energy_config.amplitude_critical_m = 2.0f;
+
+    config.plc_config.enable_emergency_stop = true;
+    config.plc_config.enable_speed_limit = true;
+    config.plc_config.enable_swing_damping = true;
+    config.plc_config.min_interval_between_same_type_ms = 500;
+
     GatewayPipeline pipeline;
 
     pipeline.SetResultCallback(
@@ -128,6 +156,68 @@ int main(int argc, char* argv[]) {
                          << ": conf=" << slot.confidence
                          << ", pos=(" << slot.x << ", " << slot.y << ", " << slot.z << ")"
                          << ", size=(" << slot.width << "x" << slot.height << "x" << slot.depth << ")";
+            }
+        });
+
+    pipeline.SetTrackingCallback(
+        [](const std::vector<CornerSlotTrackPtr>& tracks) {
+            if (tracks.empty()) return;
+            LOG_DEBUG << "[Tracker] " << tracks.size() << " active tracks";
+            for (auto& t : tracks) {
+                auto pos = t->Position();
+                auto vel = t->Velocity();
+                LOG_DEBUG << "  Track " << t->Id()
+                          << ": pos=(" << pos.x << "," << pos.y << "," << pos.z << ")"
+                          << " |v|=" << vel.Norm() << "m/s"
+                          << " hits=" << t->HitStreak();
+            }
+        });
+
+    pipeline.SetEnergyStatusCallback(
+        [](const std::vector<TrackEnergyStatus>& statuses) {
+            for (auto& s : statuses) {
+                if (s.safety_level >= SafetyLevel::WARNING) {
+                    const char* names[] = {"SAFE", "CAUTION", "WARNING", "DANGER", "CRITICAL"};
+                    int idx = static_cast<int>(s.safety_level);
+                    LOG_WARN << "[ENERGY] Track " << s.track_id
+                             << " Level=" << names[idx]
+                             << " E=" << s.current_energy_j << "J"
+                             << " V=" << s.current_speed_m_s << "m/s"
+                             << " Amp=" << s.current_amplitude_m << "m"
+                             << " Period=" << s.swing_period_s << "s"
+                             << " Cycles=" << s.completed_cycles;
+                }
+            }
+        });
+
+    pipeline.SetPlcCommandCallback(
+        [](const PlcCommand& cmd) {
+            const char* type_names[] = {
+                "NONE", "SPEED_LIMIT", "SWING_DAMPING",
+                "EMERGENCY_STOP", "HOIST_HOLD", "TROLLEY_SLOW", "ACK"
+            };
+            const char* prio_names[] = {"LOW", "NORMAL", "HIGH", "CRITICAL"};
+            int t = static_cast<int>(cmd.type);
+            int p = static_cast<int>(cmd.priority);
+
+            if (cmd.type == PlcCommandType::EMERGENCY_STOP) {
+                LOG_FATAL << "[PLC-ESTOP] EMERGENCY STOP issued! ID=" << cmd.command_id
+                          << " track=" << cmd.track_id
+                          << " energy=" << cmd.swing_energy_joules << "J"
+                          << " reason: " << cmd.reason;
+            } else if (cmd.priority >= PlcCommandPriority::HIGH) {
+                LOG_ERROR << "[PLC] " << type_names[t]
+                          << " prio=" << prio_names[p]
+                          << " ID=" << cmd.command_id
+                          << " speed_limit=" << (cmd.speed_limit_ratio * 100) << "%"
+                          << " damping=" << cmd.damping_gain
+                          << " track=" << cmd.track_id
+                          << " reason: " << cmd.reason;
+            } else {
+                LOG_INFO << "[PLC] " << type_names[t]
+                         << " prio=" << prio_names[p]
+                         << " ID=" << cmd.command_id
+                         << " speed_limit=" << (cmd.speed_limit_ratio * 100) << "%";
             }
         });
 

@@ -55,6 +55,16 @@ file(GLOB_RECURSE INFERENCE_SOURCES
     ${CMAKE_SOURCE_DIR}/include/inference/*.cuh
 )
 
+file(GLOB_RECURSE TRACKING_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/tracking/*.cpp
+    ${CMAKE_SOURCE_DIR}/include/tracking/*.h
+)
+
+file(GLOB_RECURSE SAFETY_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/safety/*.cpp
+    ${CMAKE_SOURCE_DIR}/include/safety/*.h
+)
+
 file(GLOB_RECURSE APP_SOURCES
     ${CMAKE_SOURCE_DIR}/src/app/*.cpp
     ${CMAKE_SOURCE_DIR}/include/app/*.h
@@ -88,6 +98,21 @@ if(USE_TENSORRT)
     set_target_properties(port_ai_inference PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
     )
+
+    cuda_add_library(port_ai_tracking STATIC ${TRACKING_SOURCES})
+    target_link_libraries(port_ai_tracking
+        port_ai_common
+        port_ai_inference
+        ${CUDA_LIBRARIES}
+    )
+
+    cuda_add_library(port_ai_safety STATIC ${SAFETY_SOURCES})
+    target_link_libraries(port_ai_safety
+        port_ai_common
+        port_ai_tracking
+        port_ai_inference
+        ${CUDA_LIBRARIES}
+    )
 endif()
 
 cuda_add_executable(port_ai_gateway
@@ -99,6 +124,8 @@ target_link_libraries(port_ai_gateway
     port_ai_common
     $<$<BOOL:${USE_NVDEC}>:port_ai_streaming>
     $<$<BOOL:${USE_TENSORRT}>:port_ai_inference>
+    $<$<BOOL:${USE_TENSORRT}>:port_ai_tracking>
+    $<$<BOOL:${USE_TENSORRT}>:port_ai_safety>
     ${CUDA_LIBRARIES}
     ${CMAKE_THREAD_LIBS_INIT}
 )
